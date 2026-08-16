@@ -1,0 +1,11 @@
+# dsh-model-picker bundle patch: mounts the model-picker client plugin into
+# the composition, replacing the built-in model selector seat. The row is a
+# normal host row whose name resolves to this package; its browser half is
+# picked up by dsh-client-modules via the package's dsh.client manifest and
+# served at /plugins/dsh-model-picker/client.js.
+#
+# Apply this bundle to the web profile by adding the package to
+# dsh.profile.bundles (see the profile's package.json).
+- insert:
+    - id: dsh-model-picker
+      name: dsh-model-picker
