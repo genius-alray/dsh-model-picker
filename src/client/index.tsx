@@ -193,6 +193,33 @@ function toggleFav(key: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// collapsed-groups store (per-session, module memory)
+
+// DialogContent unmounts when the dialog closes, so local useState would
+// forget collapsed groups on every reopen. Keep the per-session collapse
+// sets in module memory instead (same useSyncExternalStore pattern as the
+// dialog / effort / favorites stores above); re-opening the dialog restores
+// them within the browser session.
+const collapsedSnapshots = new Map<string, Set<string>>()
+const collapsedListeners = new Set<() => void>()
+const subscribeCollapsed = (fn: () => void): (() => void) => {
+  collapsedListeners.add(fn)
+  return () => { collapsedListeners.delete(fn) }
+}
+const getCollapsed = (sessionId: string): Set<string> => {
+  let set = collapsedSnapshots.get(sessionId)
+  if (set === undefined) {
+    set = new Set()
+    collapsedSnapshots.set(sessionId, set)
+  }
+  return set
+}
+const setCollapsed = (sessionId: string, next: Set<string>): void => {
+  collapsedSnapshots.set(sessionId, next)
+  for (const fn of collapsedListeners) fn()
+}
+
+// ---------------------------------------------------------------------------
 // fuzzy search
 
 function norm(s: unknown): string {
@@ -554,12 +581,14 @@ function DialogContent({ sessionId, t }: DialogContentProps): ReactNode {
   const favs = useSyncExternalStore(subscribeFav, getFav)
   const [query, setQuery] = useState('')
   const [favOnly, setFavOnly] = useState(false)
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const collapsed = useSyncExternalStore(subscribeCollapsed, () => getCollapsed(sessionId))
   const [cursor, setCursor] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const rowRefs = useRef<Array<HTMLDivElement | null>>([])
+  const listRef = useRef<HTMLDivElement>(null)
+  const cursorByKeyboard = useRef(false)
 
   useEffect(() => {
     if (inputRef.current) inputRef.current.focus()
@@ -585,8 +614,20 @@ function DialogContent({ sessionId, t }: DialogContentProps): ReactNode {
     return allRows.filter((r) => !collapsed.has(r.group.id))
   }, [allRows, searching, collapsed])
 
-  useEffect(() => { setCursor(0) }, [query, favOnly, collapsed, keyboardRows.length])
   useEffect(() => {
+    // List reflows (query / favorites / collapse / rows) reset the cursor to
+    // the top. This is not keyboard navigation, so reset the scroll position
+    // explicitly instead of relying on the cursor effect's scrollIntoView.
+    cursorByKeyboard.current = false
+    setCursor(0)
+    if (listRef.current) listRef.current.scrollTop = 0
+  }, [query, favOnly, collapsed, keyboardRows.length])
+  useEffect(() => {
+    // Only keyboard navigation scrolls the hovered row into view. Mouse
+    // hover must never scroll: a partially visible row under the pointer
+    // would otherwise trigger scrollIntoView on every mouseenter, making
+    // the list jump/chase the pointer during fast sweeps.
+    if (!cursorByKeyboard.current) return
     const el = rowRefs.current[cursor]
     if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' })
   }, [cursor])
@@ -613,12 +654,14 @@ function DialogContent({ sessionId, t }: DialogContentProps): ReactNode {
       if (e.key === 'ArrowDown') {
         if (keyboardRows.length === 0) return
         e.preventDefault()
+        cursorByKeyboard.current = true
         setCursor((c) => Math.min(c + 1, keyboardRows.length - 1))
         return
       }
       if (e.key === 'ArrowUp') {
         if (keyboardRows.length === 0) return
         e.preventDefault()
+        cursorByKeyboard.current = true
         setCursor((c) => Math.max(c - 1, 0))
         return
       }
@@ -675,7 +718,10 @@ function DialogContent({ sessionId, t }: DialogContentProps): ReactNode {
         key={i}
         ref={(el) => { rowRefs.current[i] = el }}
         className={'mpd-row' + (selected ? ' is-current' : '') + (i === cursor ? ' is-cursor' : '')}
-        onMouseEnter={() => setCursor(i)}
+        onMouseEnter={() => {
+          cursorByKeyboard.current = false
+          setCursor(i)
+        }}
         onMouseDown={(e) => {
           if (e.button === 0) pick(row)
         }}
@@ -707,12 +753,11 @@ function DialogContent({ sessionId, t }: DialogContentProps): ReactNode {
         type="button"
         className={'mpd-group-head' + (isCollapsed ? ' is-collapsed' : '')}
         onClick={() => {
-          setCollapsed((prev) => {
-            const next = new Set(prev)
-            if (next.has(g.id)) next.delete(g.id)
-            else next.add(g.id)
-            return next
-          })
+          const prev = getCollapsed(sessionId)
+          const next = new Set(prev)
+          if (next.has(g.id)) next.delete(g.id)
+          else next.add(g.id)
+          setCollapsed(sessionId, next)
         }}
         aria-expanded={!isCollapsed}
         title={t('group.toggle') + '：' + g.name}
@@ -764,7 +809,7 @@ function DialogContent({ sessionId, t }: DialogContentProps): ReactNode {
         rowIndex += isCollapsed ? 0 : rowsOfGroup.length
       }
     }
-    bodyEl = <div className="mpd-list">{inner}</div>
+    bodyEl = <div ref={listRef} className="mpd-list">{inner}</div>
   }
 
   return (
